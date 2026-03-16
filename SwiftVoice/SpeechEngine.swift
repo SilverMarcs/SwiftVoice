@@ -1,6 +1,9 @@
 import Speech
 import AVFoundation
 import AppKit
+import os
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "SwiftVoice", category: "SpeechEngine")
 
 @Observable
 final class SpeechEngine {
@@ -12,13 +15,34 @@ final class SpeechEngine {
     private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var insertedLength = 0
+
+    /// Text locked in from previous segments / sessions. Never goes backwards.
+    private var confirmedText = ""
+
+    /// The last partial text the recognizer gave us in this session.
+    private var lastSessionText = ""
+
+    /// Incremented on each new session so stale callbacks from cancelled tasks are ignored.
+    private var sessionID = 0
+
+    // MARK: - Accessibility: live text field updates
+
+    /// The text field element we're typing into, captured when listening starts.
+    private var targetElement: AXUIElement?
+
+    /// Cursor position in the text field when we started listening.
+    private var insertionPoint: Int = 0
+
+    /// How many characters we've inserted so far (so we can select and replace them).
+    private var insertedCount: Int = 0
+
+    /// Fallback panel shown near cursor when no AX text field is detected.
+    private var cursorPanel: CursorPanel?
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
 
-    // Double-tap detection
     private var lastRightOptionTap: Date = .distantPast
     private let doubleTapInterval: TimeInterval = 0.4
 
@@ -31,28 +55,21 @@ final class SpeechEngine {
 
     private func setupMonitors() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            Task { @MainActor in
-                self?.handleEvent(event)
-            }
+            Task { @MainActor in self?.handleEvent(event) }
         }
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            Task { @MainActor in
-                self?.handleEvent(event)
-            }
+            Task { @MainActor in self?.handleEvent(event) }
             return event
         }
 
-        // Stop listening on app switch
         appSwitchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                if self?.isListening == true {
-                    self?.stopListening()
-                }
+                if self?.isListening == true { self?.stopAndCommit() }
             }
         }
     }
@@ -60,7 +77,6 @@ final class SpeechEngine {
     private func handleEvent(_ event: NSEvent) {
         switch event.type {
         case .flagsChanged:
-            // Right Option key released (keyCode 61)
             if event.keyCode == 61 && !event.modifierFlags.contains(.option) {
                 let now = Date()
                 if now.timeIntervalSince(lastRightOptionTap) < doubleTapInterval {
@@ -70,13 +86,8 @@ final class SpeechEngine {
                     lastRightOptionTap = now
                 }
             }
-
         case .keyDown:
-            // Enter stops listening
-            if event.keyCode == 36 && isListening {
-                stopListening()
-            }
-
+            if event.keyCode == 36 && isListening { stopAndCommit() }
         default:
             break
         }
@@ -86,13 +97,13 @@ final class SpeechEngine {
 
     func toggleListening() {
         if isListening {
-            stopListening()
+            stopAndCommit()
         } else {
             Task { await startListening() }
         }
     }
 
-    // MARK: - Start / Stop
+    // MARK: - Start
 
     private func startListening() async {
         let status = await withCheckedContinuation { continuation in
@@ -107,16 +118,30 @@ final class SpeechEngine {
             return
         }
 
+        captureTargetElement()
+
         isListening = true
-        insertedLength = 0
+        confirmedText = ""
+        lastSessionText = ""
         currentTranscription = ""
         statusMessage = "Listening..."
+
+        // No AX text field → show fallback panel near cursor
+        if targetElement == nil {
+            if cursorPanel == nil {
+                cursorPanel = CursorPanel(engine: self)
+            }
+            cursorPanel?.show()
+        }
 
         await startRecognitionSession()
     }
 
     private func startRecognitionSession() async {
         guard let speechRecognizer else { return }
+
+        sessionID += 1
+        let mySession = sessionID
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -128,7 +153,6 @@ final class SpeechEngine {
 
         let engine = AVAudioEngine()
         self.audioEngine = engine
-
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
@@ -147,39 +171,75 @@ final class SpeechEngine {
 
         recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor in
-                guard let self, self.isListening else { return }
+                guard let self, self.isListening, self.sessionID == mySession else { return }
 
                 if let result {
-                    let text = result.bestTranscription.formattedString
-                    self.currentTranscription = text
+                    let sessionText = result.bestTranscription.formattedString
 
-                    if text.count > self.insertedLength {
-                        let start = text.index(text.startIndex, offsetBy: self.insertedLength)
-                        self.typeText(String(text[start...]))
-                        self.insertedLength = text.count
+                    // Detect intra-session reset: recognizer silently replaced all text
+                    if self.lastSessionText.count > 10
+                        && sessionText.count < self.lastSessionText.count / 2 {
+                        logger.info("[\(mySession)] reset detected: '\(sessionText)' replaced '\(self.lastSessionText)'")
+                        if self.confirmedText.isEmpty {
+                            self.confirmedText = self.lastSessionText
+                        } else {
+                            self.confirmedText += " " + self.lastSessionText
+                        }
+                    }
+                    self.lastSessionText = sessionText
+
+                    // Build full transcription: confirmed prefix + current session
+                    if self.confirmedText.isEmpty {
+                        self.currentTranscription = sessionText
+                    } else {
+                        self.currentTranscription = self.confirmedText + " " + sessionText
                     }
 
+                    // Push live update into the text field
+                    self.updateTargetText(self.currentTranscription)
+
                     if result.isFinal {
+                        self.confirmedText = self.currentTranscription
+                        self.lastSessionText = ""
                         self.cleanupSession()
-                        self.typeText(" ")
-                        self.insertedLength = 0
-                        self.currentTranscription = ""
                         await self.startRecognitionSession()
                     }
                 }
 
                 if let error {
-                    let nsError = error as NSError
-                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
-                        self.cleanupSession()
-                        self.insertedLength = 0
-                        await self.startRecognitionSession()
-                    } else {
-                        self.statusMessage = "Error: \(error.localizedDescription)"
-                        self.stopListening()
-                    }
+                    logger.warning("[\(mySession)] error: \(error.localizedDescription)")
+                    self.confirmedText = self.currentTranscription
+                    self.lastSessionText = ""
+                    self.cleanupSession()
+                    await self.startRecognitionSession()
                 }
             }
+        }
+    }
+
+    // MARK: - Stop & Commit
+
+    func stopAndCommit() {
+        let textToInsert = currentTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        cleanupSession()
+        isListening = false
+        confirmedText = ""
+        lastSessionText = ""
+        currentTranscription = ""
+        statusMessage = "Ready — double-tap Right ⌥ to toggle"
+
+        // Dismiss fallback panel if it was showing
+        cursorPanel?.dismiss()
+
+        if targetElement != nil && insertedCount > 0 {
+            // Text is already in the field via AX updates — just move cursor to end
+            placeCursor(at: insertionPoint + insertedCount)
+            releaseTarget()
+        } else if !textToInsert.isEmpty {
+            // No AX target — paste via clipboard
+            pasteText(textToInsert)
+            releaseTarget()
         }
     }
 
@@ -193,27 +253,116 @@ final class SpeechEngine {
         audioEngine = nil
     }
 
-    func stopListening() {
-        cleanupSession()
-        isListening = false
-        insertedLength = 0
-        statusMessage = "Ready — double-tap Right ⌥ to toggle"
+    // MARK: - Accessibility: capture & update text field
+
+    private func captureTargetElement() {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            systemWide, kAXFocusedUIElementAttribute as CFString, &focused
+        ) == .success else {
+            logger.warning("Could not get focused element")
+            targetElement = nil
+            return
+        }
+
+        let element = focused as! AXUIElement
+
+        // Verify it's a text input
+        var roleValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXRoleAttribute as CFString, &roleValue
+        ) == .success, let role = roleValue as? String else {
+            logger.warning("Could not get role of focused element")
+            targetElement = nil
+            return
+        }
+
+        let textRoles = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXWebArea"]
+        guard textRoles.contains(role) else {
+            logger.warning("Focused element is not a text field (role: \(role))")
+            targetElement = nil
+            return
+        }
+
+        // Get current cursor position
+        var selectedRange: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, &selectedRange
+        ) == .success else {
+            logger.warning("Could not get cursor position")
+            targetElement = nil
+            return
+        }
+
+        var range = CFRange()
+        AXValueGetValue(selectedRange as! AXValue, .cfRange, &range)
+
+        targetElement = element
+        insertionPoint = range.location + range.length // end of selection
+        insertedCount = 0
+
+        logger.info("Captured text field (role: \(role)) at cursor position \(self.insertionPoint)")
     }
 
-    // MARK: - Type text via CGEvent
+    /// Select our previously inserted range and replace it with the new text.
+    private func updateTargetText(_ text: String) {
+        guard let element = targetElement else { return }
 
-    private func typeText(_ text: String) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        for char in text {
-            var utf16 = Array(String(char).utf16)
-            if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-                down.post(tap: .cghidEventTap)
-            }
-            if let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-                up.post(tap: .cghidEventTap)
-            }
+        // Select the range we previously inserted
+        var selectRange = CFRange(location: insertionPoint, length: insertedCount)
+        guard let rangeValue = AXValueCreate(.cfRange, &selectRange) else { return }
+
+        let selectResult = AXUIElementSetAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, rangeValue
+        )
+        guard selectResult == .success else {
+            logger.warning("Failed to set selection range")
+            return
         }
+
+        // Replace selection with new text
+        let textResult = AXUIElementSetAttributeValue(
+            element, kAXSelectedTextAttribute as CFString, text as CFTypeRef
+        )
+        guard textResult == .success else {
+            logger.warning("Failed to set text")
+            return
+        }
+
+        insertedCount = text.count
+    }
+
+    /// Move cursor to a specific position (deselect).
+    private func placeCursor(at position: Int) {
+        guard let element = targetElement else { return }
+        var range = CFRange(location: position, length: 0)
+        if let rangeValue = AXValueCreate(.cfRange, &range) {
+            AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, rangeValue
+            )
+        }
+    }
+
+    private func releaseTarget() {
+        targetElement = nil
+        insertionPoint = 0
+        insertedCount = 0
+    }
+
+    // MARK: - Fallback: Clipboard + Cmd+V
+
+    private func pasteText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true)
+        keyDown?.flags = .maskCommand
+        keyDown?.post(tap: .cgSessionEventTap)
+
+        let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyUp?.post(tap: .cgSessionEventTap)
     }
 }

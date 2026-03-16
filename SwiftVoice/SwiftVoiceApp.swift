@@ -18,7 +18,7 @@ struct SwiftVoiceApp: App {
                 NSApp.terminate(nil)
             }
         } label: {
-            Image(systemName: engine.isListening ? "mic.fill" : "mic")
+            Image(systemName: "waveform")
         }
         .menuBarExtraStyle(.menu)
     }
