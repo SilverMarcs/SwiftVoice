@@ -1,24 +1,20 @@
-//
-//  ContentView.swift
-//  SwiftVoice
-//
-//  Created by Zabir Raihan on 16/03/2026.
-//
-
 import SwiftUI
 
 struct ContentView: View {
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
-    }
-}
+    @Environment(SpeechEngine.self) private var engine
 
-#Preview {
-    ContentView()
+    var body: some View {
+        Text(engine.statusMessage)
+            .disabled(true)
+
+        Button(engine.isListening ? "Stop Listening" : "Start Listening") {
+            engine.toggleListening()
+        }
+
+        Divider()
+
+        Button("Quit") {
+            NSApp.terminate(nil)
+        }
+    }
 }
