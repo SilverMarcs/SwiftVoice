@@ -87,7 +87,7 @@ final class SpeechEngine {
                 }
             }
         case .keyDown:
-            if event.keyCode == 36 && isListening { stopAndCommit() }
+            if isListening { stopAndCommit() }
         default:
             break
         }
