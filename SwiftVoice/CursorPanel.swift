@@ -56,6 +56,7 @@ struct CursorPanelView: View {
     let engine: SpeechEngine
     @State private var dotPulse = false
     @State private var expanded = false
+    @State private var showText = false
 
     private var hasText: Bool {
         !engine.currentTranscription.isEmpty
@@ -84,6 +85,8 @@ struct CursorPanelView: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .opacity(showText ? 1 : 0)
+                    .animation(.easeIn(duration: 0.2), value: showText)
             }
         }
         .padding(.horizontal, 16)
@@ -94,22 +97,26 @@ struct CursorPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.bottom, 4)
         .preferredColorScheme(.dark)
-        .animation(.spring(duration: 0.5, bounce: 0.3), value: expanded)
+        .animation(.spring(duration: 0.3, bounce: 0.3), value: expanded)
         .onChange(of: engine.isListening) {
             if engine.isListening {
+                showText = false
                 expanded = false
                 withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
                     dotPulse = true
                 }
             } else {
                 dotPulse = false
+                showText = false
                 expanded = false
             }
         }
         .onChange(of: engine.currentTranscription) {
             if hasText && !expanded {
-                withAnimation(.spring(duration: 0.5, bounce: 0.3)) {
+                withAnimation(.spring(duration: 0.3, bounce: 0.3)) {
                     expanded = true
+                } completion: {
+                    showText = true
                 }
             }
         }
