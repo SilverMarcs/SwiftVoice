@@ -354,9 +354,18 @@ final class SpeechEngine {
 
     private func pasteText(_ text: String) {
         let pasteboard = NSPasteboard.general
+
+        // Save current clipboard contents
+        let previousContents = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
+            guard let type = item.types.first, let data = item.data(forType: type) else { return nil }
+            return (type, data)
+        }
+
+        // Set clipboard to transcribed text
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
+        // Send Cmd+V
         let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true)
         keyDown?.flags = .maskCommand
         keyDown?.post(tap: .cgSessionEventTap)
@@ -364,5 +373,15 @@ final class SpeechEngine {
         let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false)
         keyUp?.flags = .maskCommand
         keyUp?.post(tap: .cgSessionEventTap)
+
+        // Restore original clipboard after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            pasteboard.clearContents()
+            if let previousContents, !previousContents.isEmpty {
+                for (type, data) in previousContents {
+                    pasteboard.setData(data, forType: type)
+                }
+            }
+        }
     }
 }
