@@ -17,7 +17,7 @@ class CursorPanel: NSPanel {
         isFloatingPanel = true
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = false
+        hasShadow = true
         isMovable = false
         level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
         appearance = NSAppearance(named: .darkAqua)
@@ -61,19 +61,7 @@ struct CursorPanelView: View {
         !engine.currentTranscription.isEmpty
     }
 
-    private var lastLine: String {
-        let text = engine.currentTranscription
-        guard !text.isEmpty else { return "" }
-        if let range = text.range(of: "\n", options: .backwards) {
-            return String(text[range.upperBound...])
-        }
-        if text.count > 60 {
-            return "..." + String(text.suffix(57))
-        }
-        return text
-    }
-
-    private let closedWidth: CGFloat = 140
+    private let closedWidth: CGFloat = 130
     private let expandedWidth: CGFloat = 480
 
     var body: some View {
@@ -90,7 +78,7 @@ struct CursorPanelView: View {
                     .foregroundStyle(.white.opacity(0.85))
             } else {
                 // Expanded: show transcription text
-                Text(lastLine)
+                Text(engine.currentTranscription)
                     .font(.system(size: 14))
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
@@ -101,13 +89,12 @@ struct CursorPanelView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .frame(width: expanded ? expandedWidth : closedWidth)
-        .background(.black.opacity(0.88), in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.15), lineWidth: 1))
-        .shadow(color: .black.opacity(0.4), radius: 8, y: 4)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 1))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.bottom, 4)
         .preferredColorScheme(.dark)
-        .animation(.easeInOut(duration: 0.3), value: expanded)
+        .animation(.spring(duration: 0.5, bounce: 0.3), value: expanded)
         .onChange(of: engine.isListening) {
             if engine.isListening {
                 expanded = false
@@ -121,7 +108,7 @@ struct CursorPanelView: View {
         }
         .onChange(of: engine.currentTranscription) {
             if hasText && !expanded {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.spring(duration: 0.5, bounce: 0.3)) {
                     expanded = true
                 }
             }
