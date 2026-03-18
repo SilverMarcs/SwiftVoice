@@ -48,7 +48,10 @@ final class SpeechEngine {
 
     init() {
         speechRecognizer = SFSpeechRecognizer()
-        setupMonitors()
+        // Defer monitor setup so it doesn't interfere with MenuBarExtra initialization
+        DispatchQueue.main.async { [weak self] in
+            self?.setupMonitors()
+        }
     }
 
     // MARK: - Event Monitors
