@@ -25,18 +25,8 @@ final class SpeechEngine {
     /// Incremented on each new session so stale callbacks from cancelled tasks are ignored.
     private var sessionID = 0
 
-    // MARK: - Accessibility: live text field updates
+    // MARK: - Floating transcription panel
 
-    /// The text field element we're typing into, captured when listening starts.
-    private var targetElement: AXUIElement?
-
-    /// Cursor position in the text field when we started listening.
-    private var insertionPoint: Int = 0
-
-    /// How many characters we've inserted so far (so we can select and replace them).
-    private var insertedCount: Int = 0
-
-    /// Fallback panel shown near cursor when no AX text field is detected.
     private var cursorPanel: CursorPanel?
 
     private var globalMonitor: Any?
@@ -121,21 +111,16 @@ final class SpeechEngine {
             return
         }
 
-        captureTargetElement()
-
         isListening = true
         confirmedText = ""
         lastSessionText = ""
         currentTranscription = ""
         statusMessage = "Listening..."
 
-        // No AX text field → show fallback panel near cursor
-        if targetElement == nil {
-            if cursorPanel == nil {
-                cursorPanel = CursorPanel(engine: self)
-            }
-            cursorPanel?.show()
+        if cursorPanel == nil {
+            cursorPanel = CursorPanel(engine: self)
         }
+        cursorPanel?.show()
 
         await startRecognitionSession()
     }
@@ -198,9 +183,6 @@ final class SpeechEngine {
                         self.currentTranscription = self.confirmedText + " " + sessionText
                     }
 
-                    // Push live update into the text field
-                    self.updateTargetText(self.currentTranscription)
-
                     if result.isFinal {
                         self.confirmedText = self.currentTranscription
                         self.lastSessionText = ""
@@ -232,17 +214,11 @@ final class SpeechEngine {
         currentTranscription = ""
         statusMessage = "Ready — double-tap Right ⌥ to toggle"
 
-        // Dismiss fallback panel if it was showing
+        // Dismiss floating transcription panel
         cursorPanel?.dismiss()
 
-        if targetElement != nil && insertedCount > 0 {
-            // Text is already in the field via AX updates — just move cursor to end
-            placeCursor(at: insertionPoint + insertedCount)
-            releaseTarget()
-        } else if !textToInsert.isEmpty {
-            // No AX target — paste via clipboard
+        if !textToInsert.isEmpty {
             pasteText(textToInsert)
-            releaseTarget()
         }
     }
 
@@ -256,104 +232,7 @@ final class SpeechEngine {
         audioEngine = nil
     }
 
-    // MARK: - Accessibility: capture & update text field
-
-    private func captureTargetElement() {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focused: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            systemWide, kAXFocusedUIElementAttribute as CFString, &focused
-        ) == .success else {
-            logger.warning("Could not get focused element")
-            targetElement = nil
-            return
-        }
-
-        let element = focused as! AXUIElement
-
-        // Verify it's a text input
-        var roleValue: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXRoleAttribute as CFString, &roleValue
-        ) == .success, let role = roleValue as? String else {
-            logger.warning("Could not get role of focused element")
-            targetElement = nil
-            return
-        }
-
-        let textRoles = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXWebArea"]
-        guard textRoles.contains(role) else {
-            logger.warning("Focused element is not a text field (role: \(role))")
-            targetElement = nil
-            return
-        }
-
-        // Get current cursor position
-        var selectedRange: AnyObject?
-        guard AXUIElementCopyAttributeValue(
-            element, kAXSelectedTextRangeAttribute as CFString, &selectedRange
-        ) == .success else {
-            logger.warning("Could not get cursor position")
-            targetElement = nil
-            return
-        }
-
-        var range = CFRange()
-        AXValueGetValue(selectedRange as! AXValue, .cfRange, &range)
-
-        targetElement = element
-        insertionPoint = range.location + range.length // end of selection
-        insertedCount = 0
-
-        logger.info("Captured text field (role: \(role)) at cursor position \(self.insertionPoint)")
-    }
-
-    /// Select our previously inserted range and replace it with the new text.
-    private func updateTargetText(_ text: String) {
-        guard let element = targetElement else { return }
-
-        // Select the range we previously inserted
-        var selectRange = CFRange(location: insertionPoint, length: insertedCount)
-        guard let rangeValue = AXValueCreate(.cfRange, &selectRange) else { return }
-
-        let selectResult = AXUIElementSetAttributeValue(
-            element, kAXSelectedTextRangeAttribute as CFString, rangeValue
-        )
-        guard selectResult == .success else {
-            logger.warning("Failed to set selection range")
-            return
-        }
-
-        // Replace selection with new text
-        let textResult = AXUIElementSetAttributeValue(
-            element, kAXSelectedTextAttribute as CFString, text as CFTypeRef
-        )
-        guard textResult == .success else {
-            logger.warning("Failed to set text")
-            return
-        }
-
-        insertedCount = text.count
-    }
-
-    /// Move cursor to a specific position (deselect).
-    private func placeCursor(at position: Int) {
-        guard let element = targetElement else { return }
-        var range = CFRange(location: position, length: 0)
-        if let rangeValue = AXValueCreate(.cfRange, &range) {
-            AXUIElementSetAttributeValue(
-                element, kAXSelectedTextRangeAttribute as CFString, rangeValue
-            )
-        }
-    }
-
-    private func releaseTarget() {
-        targetElement = nil
-        insertionPoint = 0
-        insertedCount = 0
-    }
-
-    // MARK: - Fallback: Clipboard + Cmd+V
+    // MARK: - Commit: Clipboard + Cmd+V
 
     private func pasteText(_ text: String) {
         let pasteboard = NSPasteboard.general
