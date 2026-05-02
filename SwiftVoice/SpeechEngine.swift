@@ -8,7 +8,7 @@ import Speech
 final class SpeechEngine {
     var isListening = false
     var currentTranscription = ""
-    var statusMessage = "Ready — double-tap Right ⌥ to toggle"
+    var statusMessage = "Ready — press F5 to toggle"
 
     private var analyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
@@ -20,13 +20,9 @@ final class SpeechEngine {
     private var volatileText = ""
 
     private var notchPanel: NotchPanel?
-    private var globalMonitor: Any?
-    private var localMonitor: Any?
+    private var keyDownMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
     private let dictationKeyBlocker = DictationKeyBlocker()
-
-    private var lastRightOptionTap: Date = .distantPast
-    private let doubleTapInterval: TimeInterval = 0.4
 
     init() {
         DispatchQueue.main.async { [weak self] in
@@ -50,15 +46,15 @@ final class SpeechEngine {
         return AXIsProcessTrustedWithOptions(opts)
     }
 
-    // MARK: - Hotkey monitors
+    // MARK: - Monitors
 
     private func setupMonitors() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            Task { @MainActor in self?.handleEvent(event) }
-        }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            Task { @MainActor in self?.handleEvent(event) }
-            return event
+        // Any keystroke other than the dictation key (which is swallowed at the
+        // HID tap) cancels an in-progress recording.
+        keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] _ in
+            Task { @MainActor in
+                if self?.isListening == true { self?.stopAndCommit() }
+            }
         }
         appSwitchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -68,25 +64,6 @@ final class SpeechEngine {
             Task { @MainActor in
                 if self?.isListening == true { self?.stopAndCommit() }
             }
-        }
-    }
-
-    private func handleEvent(_ event: NSEvent) {
-        switch event.type {
-        case .flagsChanged:
-            if event.keyCode == 61 && !event.modifierFlags.contains(.option) {
-                let now = Date()
-                if now.timeIntervalSince(lastRightOptionTap) < doubleTapInterval {
-                    lastRightOptionTap = .distantPast
-                    toggleListening()
-                } else {
-                    lastRightOptionTap = now
-                }
-            }
-        case .keyDown:
-            if isListening { stopAndCommit() }
-        default:
-            break
         }
     }
 
@@ -239,7 +216,7 @@ final class SpeechEngine {
         currentTranscription = ""
         confirmedText = ""
         volatileText = ""
-        statusMessage = "Ready — double-tap Right ⌥ to toggle"
+        statusMessage = "Ready — press F5 to toggle"
         notchPanel?.dismiss()
 
         if !textToInsert.isEmpty { pasteText(textToInsert) }

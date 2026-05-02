@@ -8,13 +8,9 @@ struct SwiftVoiceApp: App {
         MenuBarExtra {
             Text(engine.statusMessage)
 
-            Button(engine.isListening ? "Stop Listening" : "Start Listening") {
-                engine.toggleListening()
-            }
-
             Divider()
 
-            Button("Quit") {
+            Button("Quit Murmur") {
                 NSApp.terminate(nil)
             }
         } label: {
