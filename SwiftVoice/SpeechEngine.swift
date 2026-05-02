@@ -1,34 +1,25 @@
-import Speech
-import AVFoundation
 import AppKit
-import os
-
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "SwiftVoice", category: "SpeechEngine")
+import ApplicationServices
+import AVFoundation
+import Speech
 
 @Observable
+@MainActor
 final class SpeechEngine {
     var isListening = false
     var currentTranscription = ""
     var statusMessage = "Ready — double-tap Right ⌥ to toggle"
 
-    private var speechRecognizer: SFSpeechRecognizer?
+    private var analyzer: SpeechAnalyzer?
+    private var transcriber: SpeechTranscriber?
     private var audioEngine: AVAudioEngine?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
+    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var resultsTask: Task<Void, Never>?
 
-    /// Text locked in from previous segments / sessions. Never goes backwards.
     private var confirmedText = ""
-
-    /// The last partial text the recognizer gave us in this session.
-    private var lastSessionText = ""
-
-    /// Incremented on each new session so stale callbacks from cancelled tasks are ignored.
-    private var sessionID = 0
-
-    // MARK: - Floating transcription panel
+    private var volatileText = ""
 
     private var cursorPanel: CursorPanel?
-
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
@@ -37,25 +28,29 @@ final class SpeechEngine {
     private let doubleTapInterval: TimeInterval = 0.4
 
     init() {
-        speechRecognizer = SFSpeechRecognizer()
-        // Defer monitor setup so it doesn't interfere with MenuBarExtra initialization
         DispatchQueue.main.async { [weak self] in
             self?.setupMonitors()
+            self?.promptAccessibilityIfNeeded()
         }
     }
 
-    // MARK: - Event Monitors
+    /// macOS does not auto-prompt for Accessibility; without it our synthetic ⌘V is silently dropped.
+    @discardableResult
+    private func promptAccessibilityIfNeeded() -> Bool {
+        let opts = ["AXTrustedCheckOptionPrompt" as CFString: true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(opts)
+    }
+
+    // MARK: - Hotkey monitors
 
     private func setupMonitors() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
             Task { @MainActor in self?.handleEvent(event) }
         }
-
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
             Task { @MainActor in self?.handleEvent(event) }
             return event
         }
-
         appSwitchObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -99,107 +94,120 @@ final class SpeechEngine {
     // MARK: - Start
 
     private func startListening() async {
-        let status = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { s in continuation.resume(returning: s) }
-        }
-        guard status == .authorized else {
-            statusMessage = "Speech recognition not authorized"
-            return
-        }
-        guard let speechRecognizer, speechRecognizer.isAvailable else {
-            statusMessage = "Speech recognizer unavailable"
+        if !AXIsProcessTrusted() {
+            statusMessage = "Grant Accessibility in System Settings — needed to paste"
+            promptAccessibilityIfNeeded()
             return
         }
 
-        isListening = true
         confirmedText = ""
-        lastSessionText = ""
+        volatileText = ""
         currentTranscription = ""
-        statusMessage = "Listening..."
+        isListening = true
+        statusMessage = "Preparing…"
 
-        if cursorPanel == nil {
-            cursorPanel = CursorPanel(engine: self)
-        }
+        if cursorPanel == nil { cursorPanel = CursorPanel(engine: self) }
         cursorPanel?.show()
 
-        await startRecognitionSession()
+        do {
+            try await beginRecognition()
+            statusMessage = "Listening…"
+        } catch {
+            print("[SpeechEngine] start failed: \(error.localizedDescription)")
+            statusMessage = error.localizedDescription
+            isListening = false
+            let panel = cursorPanel
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { panel?.dismiss() }
+        }
     }
 
-    private func startRecognitionSession() async {
-        guard let speechRecognizer else { return }
-
-        sessionID += 1
-        let mySession = sessionID
-
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.addsPunctuation = true
-        if speechRecognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
-        recognitionRequest = request
-
-        let engine = AVAudioEngine()
-        self.audioEngine = engine
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-
-        nonisolated(unsafe) let req = request
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            req.append(buffer)
+    private func beginRecognition() async throws {
+        guard await AVCaptureDevice.requestAccess(for: .audio) else {
+            throw err("Microphone access denied")
         }
 
-        do {
-            try engine.start()
-        } catch {
-            statusMessage = "Audio error: \(error.localizedDescription)"
-            isListening = false
-            return
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) else {
+            throw err("en-US not supported by SpeechTranscriber")
         }
 
-        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
-            Task { @MainActor in
-                guard let self, self.isListening, self.sessionID == mySession else { return }
+        let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        self.transcriber = transcriber
 
-                if let result {
-                    let sessionText = result.bestTranscription.formattedString
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            statusMessage = "Downloading model…"
+            try await request.downloadAndInstall()
+        }
 
-                    // Detect intra-session reset: recognizer silently replaced all text
-                    if self.lastSessionText.count > 10
-                        && sessionText.count < self.lastSessionText.count / 2 {
-                        logger.info("[\(mySession)] reset detected: '\(sessionText)' replaced '\(self.lastSessionText)'")
-                        if self.confirmedText.isEmpty {
-                            self.confirmedText = self.lastSessionText
+        guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw err("No compatible audio format")
+        }
+
+        let (inputSeq, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        inputContinuation = continuation
+
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        self.analyzer = analyzer
+
+        resultsTask = Task { [weak self, transcriber] in
+            do {
+                for try await result in transcriber.results {
+                    let text = String(result.text.characters)
+                    let isFinal = result.isFinal
+                    await MainActor.run {
+                        guard let self, self.isListening else { return }
+                        if isFinal {
+                            self.confirmedText = self.confirmedText.isEmpty
+                                ? text
+                                : self.confirmedText + " " + text
+                            self.volatileText = ""
                         } else {
-                            self.confirmedText += " " + self.lastSessionText
+                            self.volatileText = text
                         }
-                    }
-                    self.lastSessionText = sessionText
-
-                    // Build full transcription: confirmed prefix + current session
-                    if self.confirmedText.isEmpty {
-                        self.currentTranscription = sessionText
-                    } else {
-                        self.currentTranscription = self.confirmedText + " " + sessionText
-                    }
-
-                    if result.isFinal {
-                        self.confirmedText = self.currentTranscription
-                        self.lastSessionText = ""
-                        self.cleanupSession()
-                        await self.startRecognitionSession()
+                        self.currentTranscription = self.combinedText()
                     }
                 }
-
-                if let error {
-                    logger.warning("[\(mySession)] error: \(error.localizedDescription)")
-                    self.confirmedText = self.currentTranscription
-                    self.lastSessionText = ""
-                    self.cleanupSession()
-                    await self.startRecognitionSession()
+            } catch {
+                await MainActor.run {
+                    self?.statusMessage = "Recognition error: \(error.localizedDescription)"
                 }
             }
         }
+
+        try await analyzer.start(inputSequence: inputSeq)
+
+        let engine = AVAudioEngine()
+        audioEngine = engine
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        let converter = AVAudioConverter(from: inputFormat, to: analyzerFormat)
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
+            nonisolated(unsafe) let micBuffer = buffer
+            guard let converter else {
+                continuation.yield(AnalyzerInput(buffer: micBuffer))
+                return
+            }
+            let ratio = analyzerFormat.sampleRate / inputFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(micBuffer.frameLength) * ratio + 1024)
+            guard let outBuffer = AVAudioPCMBuffer(pcmFormat: analyzerFormat, frameCapacity: capacity) else { return }
+
+            var consumed = false
+            var convertError: NSError?
+            converter.convert(to: outBuffer, error: &convertError) { _, status in
+                if consumed {
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                consumed = true
+                status.pointee = .haveData
+                return micBuffer
+            }
+            if convertError == nil && outBuffer.frameLength > 0 {
+                continuation.yield(AnalyzerInput(buffer: outBuffer))
+            }
+        }
+
+        try engine.start()
     }
 
     // MARK: - Stop & Commit
@@ -207,56 +215,70 @@ final class SpeechEngine {
     func stopAndCommit() {
         let textToInsert = currentTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        cleanupSession()
-        isListening = false
-        confirmedText = ""
-        lastSessionText = ""
-        currentTranscription = ""
-        statusMessage = "Ready — double-tap Right ⌥ to toggle"
+        // Capture the live state and reset UI synchronously so paste targets the user's app.
+        let engine = audioEngine
+        let analyzer = self.analyzer
+        let continuation = inputContinuation
+        let task = resultsTask
 
-        // Dismiss floating transcription panel
+        audioEngine = nil
+        self.analyzer = nil
+        transcriber = nil
+        inputContinuation = nil
+        resultsTask = nil
+
+        isListening = false
+        currentTranscription = ""
+        confirmedText = ""
+        volatileText = ""
+        statusMessage = "Ready — double-tap Right ⌥ to toggle"
         cursorPanel?.dismiss()
 
-        if !textToInsert.isEmpty {
-            pasteText(textToInsert)
+        if !textToInsert.isEmpty { pasteText(textToInsert) }
+
+        // Tear down the recognition pipeline off the hot path.
+        Task.detached {
+            engine?.stop()
+            engine?.inputNode.removeTap(onBus: 0)
+            continuation?.finish()
+            if let analyzer {
+                try? await analyzer.finalizeAndFinishThroughEndOfInput()
+            }
+            task?.cancel()
         }
     }
 
-    private func cleanupSession() {
-        audioEngine?.stop()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
-        audioEngine = nil
+    // MARK: - Helpers
+
+    private func combinedText() -> String {
+        if volatileText.isEmpty { return confirmedText }
+        if confirmedText.isEmpty { return volatileText }
+        return confirmedText + " " + volatileText
     }
 
-    // MARK: - Commit: Clipboard + Cmd+V
+    private func err(_ message: String) -> NSError {
+        NSError(domain: "SpeechEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    // MARK: - Paste via Cmd+V
 
     private func pasteText(_ text: String) {
         let pasteboard = NSPasteboard.general
-
-        // Save current clipboard contents
         let previousContents = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
             guard let type = item.types.first, let data = item.data(forType: type) else { return nil }
             return (type, data)
         }
 
-        // Set clipboard to transcribed text
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // Send Cmd+V
-        let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true)
-        keyDown?.flags = .maskCommand
-        keyDown?.post(tap: .cgSessionEventTap)
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true)
+        down?.flags = .maskCommand
+        down?.post(tap: .cgSessionEventTap)
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false)
+        up?.flags = .maskCommand
+        up?.post(tap: .cgSessionEventTap)
 
-        let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false)
-        keyUp?.flags = .maskCommand
-        keyUp?.post(tap: .cgSessionEventTap)
-
-        // Restore original clipboard after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             pasteboard.clearContents()
             if let previousContents, !previousContents.isEmpty {
