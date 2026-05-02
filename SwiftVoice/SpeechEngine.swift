@@ -19,7 +19,7 @@ final class SpeechEngine {
     private var confirmedText = ""
     private var volatileText = ""
 
-    private var cursorPanel: CursorPanel?
+    private var notchPanel: NotchPanel?
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
@@ -29,8 +29,12 @@ final class SpeechEngine {
 
     init() {
         DispatchQueue.main.async { [weak self] in
-            self?.setupMonitors()
-            self?.promptAccessibilityIfNeeded()
+            guard let self else { return }
+            self.setupMonitors()
+            self.promptAccessibilityIfNeeded()
+            // Pre-warm the notch panel so the first show() doesn't pay the
+            // NSHostingView/SwiftUI initial-layout cost on the animation hot path.
+            self.notchPanel = NotchPanel(engine: self)
         }
     }
 
@@ -106,8 +110,7 @@ final class SpeechEngine {
         isListening = true
         statusMessage = "Preparing…"
 
-        if cursorPanel == nil { cursorPanel = CursorPanel(engine: self) }
-        cursorPanel?.show()
+        notchPanel?.show()
 
         do {
             try await beginRecognition()
@@ -116,7 +119,7 @@ final class SpeechEngine {
             print("[SpeechEngine] start failed: \(error.localizedDescription)")
             statusMessage = error.localizedDescription
             isListening = false
-            let panel = cursorPanel
+            let panel = notchPanel
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { panel?.dismiss() }
         }
     }
@@ -232,7 +235,7 @@ final class SpeechEngine {
         confirmedText = ""
         volatileText = ""
         statusMessage = "Ready — double-tap Right ⌥ to toggle"
-        cursorPanel?.dismiss()
+        notchPanel?.dismiss()
 
         if !textToInsert.isEmpty { pasteText(textToInsert) }
 
