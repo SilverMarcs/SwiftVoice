@@ -23,6 +23,7 @@ final class SpeechEngine {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
+    private let dictationKeyBlocker = DictationKeyBlocker()
 
     private var lastRightOptionTap: Date = .distantPast
     private let doubleTapInterval: TimeInterval = 0.4
@@ -32,6 +33,10 @@ final class SpeechEngine {
             guard let self else { return }
             self.setupMonitors()
             self.promptAccessibilityIfNeeded()
+            self.dictationKeyBlocker.onPress = { [weak self] in
+                Task { @MainActor in self?.toggleListening() }
+            }
+            self.dictationKeyBlocker.install()
             // Pre-warm the notch panel so the first show() doesn't pay the
             // NSHostingView/SwiftUI initial-layout cost on the animation hot path.
             self.notchPanel = NotchPanel(engine: self)

@@ -257,7 +257,7 @@ struct NotchPanelView: View {
         // Manual nudge: the dot's center sits `dotInsetFromNotch` pt to the left of
         // the hardware notch (smaller than half the compact extension), so it visually
         // reads as closer to the notch.
-        let dotInsetFromNotch: CGFloat = 9
+        let dotInsetFromNotch: CGFloat = 8
         let leadingPadding = expandedExtension - dotInsetFromNotch - dotSize / 2
         return HStack(spacing: 0) {
             Circle()
