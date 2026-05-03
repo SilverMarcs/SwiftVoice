@@ -133,6 +133,7 @@ final class SpeechEngine {
         streamingActive = hasEditableFocus()
         streamingInserted = ""
         micPanel?.show()
+        DictationSounds.shared.playBegin()
 
         do {
             try await beginRecognition()
@@ -273,6 +274,7 @@ final class SpeechEngine {
         volatileText = ""
         statusMessage = "Ready — press F5 to toggle"
         micPanel?.dismiss()
+        DictationSounds.shared.playEnd()
 
         let wasStreaming = streamingActive
         streamingActive = false
