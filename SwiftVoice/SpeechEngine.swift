@@ -245,9 +245,46 @@ final class SpeechEngine {
         NSError(domain: "SpeechEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    // MARK: - Paste via Cmd+V
+    // MARK: - Insert text
 
     private func pasteText(_ text: String) {
+        if hasEditableFocus() {
+            typeUnicode(text)
+        } else {
+            pasteViaClipboard(text)
+        }
+    }
+
+    private func typeUnicode(_ text: String) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let units = Array(text.utf16)
+        // CGEventKeyboardSetUnicodeString is documented as accepting up to ~20
+        // UTF-16 units reliably; chunk to stay safely under that.
+        let chunkSize = 20
+        var index = 0
+        while index < units.count {
+            let end = min(index + chunkSize, units.count)
+            let slice = Array(units[index..<end])
+
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            down?.flags = []
+            slice.withUnsafeBufferPointer { buf in
+                down?.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: buf.baseAddress)
+            }
+            down?.post(tap: .cgSessionEventTap)
+
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            up?.flags = []
+            slice.withUnsafeBufferPointer { buf in
+                up?.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: buf.baseAddress)
+            }
+            up?.post(tap: .cgSessionEventTap)
+
+            index = end
+        }
+    }
+
+    private func pasteViaClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         let previousContents = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
             guard let type = item.types.first, let data = item.data(forType: type) else { return nil }
@@ -264,7 +301,7 @@ final class SpeechEngine {
         up?.flags = .maskCommand
         up?.post(tap: .cgSessionEventTap)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             pasteboard.clearContents()
             if let previousContents, !previousContents.isEmpty {
                 for (type, data) in previousContents {
@@ -272,5 +309,45 @@ final class SpeechEngine {
                 }
             }
         }
+    }
+
+    private func hasEditableFocus() -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused else { return false }
+        let axElement = element as! AXUIElement
+
+        // Native AppKit / UIKit-style editable roles.
+        var roleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleRef) == .success,
+           let role = roleRef as? String {
+            switch role {
+            case "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField":
+                return true
+            default:
+                break
+            }
+        }
+
+        // Chromium/Electron and web inputs often report AXGroup/AXWebArea but
+        // expose a settable selected-text attribute when an editor is focused.
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(axElement, kAXSelectedTextAttribute as CFString, &settable) == .success,
+           settable.boolValue {
+            return true
+        }
+        if AXUIElementIsAttributeSettable(axElement, kAXValueAttribute as CFString, &settable) == .success,
+           settable.boolValue {
+            // Guard against settable AXValue on non-text controls (sliders, etc.)
+            // by requiring the current value to be a string.
+            var valueRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
+               valueRef is String {
+                return true
+            }
+        }
+
+        return false
     }
 }
