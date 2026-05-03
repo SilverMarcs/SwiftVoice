@@ -19,10 +19,24 @@ final class SpeechEngine {
     private var confirmedText = ""
     private var volatileText = ""
 
-    private var notchPanel: NotchPanel?
+    private var micPanel: MicIndicatorPanel?
     private var keyDownMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
     private let dictationKeyBlocker = DictationKeyBlocker()
+
+    /// True when we're streaming text directly into a focused editable
+    /// element. Set at the start of each session; if false, we fall back to
+    /// clipboard-paste at commit time.
+    private var streamingActive = false
+
+    /// What we have typed into the host field since this session began.
+    /// Used to compute incremental diffs when the model revises words.
+    /// We never delete more than `streamingInserted.count` characters, so
+    /// pre-existing text in the field is never touched.
+    private var streamingInserted: String = ""
+
+    /// Prewarmed at app start so dictation toggle pays no model/asset cost.
+    private var prewarmedLocale: Locale?
 
     init() {
         DispatchQueue.main.async { [weak self] in
@@ -33,10 +47,27 @@ final class SpeechEngine {
                 Task { @MainActor in self?.toggleListening() }
             }
             self.dictationKeyBlocker.install()
-            // Pre-warm the notch panel so the first show() doesn't pay the
-            // NSHostingView/SwiftUI initial-layout cost on the animation hot path.
-            self.notchPanel = NotchPanel(engine: self)
+            // Pre-warm so the first show() doesn't pay the NSHostingView/SwiftUI
+            // initial-layout cost on the animation hot path.
+            self.micPanel = MicIndicatorPanel()
+            Task { await self.prewarmRecognition() }
         }
+    }
+
+    /// Front-loads the slow speech-recognition setup so toggling F5 doesn't
+    /// hitch on first use: microphone permission probe, locale lookup, asset
+    /// install, audio-format query.
+    private func prewarmRecognition() async {
+        _ = await AVCaptureDevice.requestAccess(for: .audio)
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) else {
+            return
+        }
+        prewarmedLocale = locale
+        let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
+        if let request = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try? await request.downloadAndInstall()
+        }
+        _ = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
     }
 
     /// macOS does not auto-prompt for Accessibility; without it our synthetic ⌘V is silently dropped.
@@ -50,8 +81,15 @@ final class SpeechEngine {
 
     private func setupMonitors() {
         // Any keystroke other than the dictation key (which is swallowed at the
-        // HID tap) cancels an in-progress recording.
-        keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] _ in
+        // HID tap) cancels an in-progress recording — but ignore events that
+        // originated from our own process, since streaming dictation injects
+        // backspaces and unicode events that would otherwise self-cancel.
+        let ourPid = Int64(ProcessInfo.processInfo.processIdentifier)
+        keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            if let cgEvent = event.cgEvent {
+                let sourcePid = cgEvent.getIntegerValueField(.eventSourceUnixProcessID)
+                if sourcePid == ourPid { return }
+            }
             Task { @MainActor in
                 if self?.isListening == true { self?.stopAndCommit() }
             }
@@ -92,7 +130,9 @@ final class SpeechEngine {
         isListening = true
         statusMessage = "Preparing…"
 
-        notchPanel?.show()
+        streamingActive = hasEditableFocus()
+        streamingInserted = ""
+        micPanel?.show()
 
         do {
             try await beginRecognition()
@@ -101,7 +141,8 @@ final class SpeechEngine {
             print("[SpeechEngine] start failed: \(error.localizedDescription)")
             statusMessage = error.localizedDescription
             isListening = false
-            let panel = notchPanel
+            streamingActive = false
+            let panel = micPanel
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { panel?.dismiss() }
         }
     }
@@ -111,7 +152,13 @@ final class SpeechEngine {
             throw err("Microphone access denied")
         }
 
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) else {
+        let locale: Locale
+        if let cached = prewarmedLocale {
+            locale = cached
+        } else if let resolved = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) {
+            locale = resolved
+            prewarmedLocale = resolved
+        } else {
             throw err("en-US not supported by SpeechTranscriber")
         }
 
@@ -148,7 +195,13 @@ final class SpeechEngine {
                         } else {
                             self.volatileText = text
                         }
-                        self.currentTranscription = self.combinedText()
+                        let updated = self.combinedText()
+                        let changed = updated != self.currentTranscription
+                        self.currentTranscription = updated
+                        if self.streamingActive, changed {
+                            self.streamUpdate(to: updated)
+                            self.micPanel?.noteActivity()
+                        }
                     }
                 }
             } catch {
@@ -192,7 +245,9 @@ final class SpeechEngine {
             }
         }
 
-        try engine.start()
+        // Audio system activation can block briefly; run off-main so the
+        // mic indicator's spring-in animation doesn't hitch.
+        try await Task.detached { try engine.start() }.value
     }
 
     // MARK: - Stop & Commit
@@ -217,9 +272,17 @@ final class SpeechEngine {
         confirmedText = ""
         volatileText = ""
         statusMessage = "Ready — press F5 to toggle"
-        notchPanel?.dismiss()
+        micPanel?.dismiss()
 
-        if !textToInsert.isEmpty { pasteText(textToInsert) }
+        let wasStreaming = streamingActive
+        streamingActive = false
+        streamingInserted = ""
+
+        // If we streamed, the text is already in the field — nothing more to do.
+        // Otherwise (no editable focus at start), fall back to clipboard paste.
+        if !wasStreaming, !textToInsert.isEmpty {
+            pasteViaClipboard(textToInsert)
+        }
 
         // Tear down the recognition pipeline off the hot path.
         Task.detached {
@@ -245,43 +308,83 @@ final class SpeechEngine {
         NSError(domain: "SpeechEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    // MARK: - Insert text
+    // MARK: - Streaming insert
 
-    private func pasteText(_ text: String) {
-        if hasEditableFocus() {
-            typeUnicode(text)
-        } else {
-            pasteViaClipboard(text)
+    /// Reconciles host-field state with the latest transcription by deleting
+    /// the changed tail of what we previously typed and re-typing the new tail.
+    /// We never delete past `streamingInserted`, so any pre-existing user text
+    /// in the field is left untouched.
+    private func streamUpdate(to newText: String) {
+        let common = commonPrefixCount(streamingInserted, newText)
+        let toDelete = streamingInserted.count - common
+        if toDelete > 0 {
+            sendBackspaces(count: toDelete)
+        }
+        if common < newText.count {
+            let suffix = String(newText[newText.index(newText.startIndex, offsetBy: common)...])
+            typeUnicode(suffix)
+        }
+        streamingInserted = newText
+    }
+
+    private func commonPrefixCount(_ a: String, _ b: String) -> Int {
+        var i = a.startIndex
+        var j = b.startIndex
+        var count = 0
+        while i < a.endIndex, j < b.endIndex, a[i] == b[j] {
+            count += 1
+            a.formIndex(after: &i)
+            b.formIndex(after: &j)
+        }
+        return count
+    }
+
+    private func sendBackspaces(count: Int) {
+        guard count > 0 else { return }
+        let source = CGEventSource(stateID: .combinedSessionState)
+        for _ in 0..<count {
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+            down?.flags = []
+            down?.post(tap: .cgSessionEventTap)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+            up?.flags = []
+            up?.post(tap: .cgSessionEventTap)
         }
     }
 
     private func typeUnicode(_ text: String) {
         let source = CGEventSource(stateID: .combinedSessionState)
-        let units = Array(text.utf16)
-        // CGEventKeyboardSetUnicodeString is documented as accepting up to ~20
-        // UTF-16 units reliably; chunk to stay safely under that.
-        let chunkSize = 20
-        var index = 0
-        while index < units.count {
-            let end = min(index + chunkSize, units.count)
-            let slice = Array(units[index..<end])
+        // CGEventKeyboardSetUnicodeString is reliable up to ~20 UTF-16 units.
+        // Chunk on Character boundaries so we never split a grapheme cluster.
+        let maxUnits = 20
+        var batch: [UInt16] = []
 
+        func flush() {
+            guard !batch.isEmpty else { return }
             let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
             down?.flags = []
-            slice.withUnsafeBufferPointer { buf in
-                down?.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: buf.baseAddress)
+            batch.withUnsafeBufferPointer { buf in
+                down?.keyboardSetUnicodeString(stringLength: batch.count, unicodeString: buf.baseAddress)
             }
             down?.post(tap: .cgSessionEventTap)
 
             let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
             up?.flags = []
-            slice.withUnsafeBufferPointer { buf in
-                up?.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: buf.baseAddress)
+            batch.withUnsafeBufferPointer { buf in
+                up?.keyboardSetUnicodeString(stringLength: batch.count, unicodeString: buf.baseAddress)
             }
             up?.post(tap: .cgSessionEventTap)
-
-            index = end
+            batch.removeAll(keepingCapacity: true)
         }
+
+        for char in text {
+            let units = Array(char.utf16)
+            if batch.count + units.count > maxUnits {
+                flush()
+            }
+            batch.append(contentsOf: units)
+        }
+        flush()
     }
 
     private func pasteViaClipboard(_ text: String) {
