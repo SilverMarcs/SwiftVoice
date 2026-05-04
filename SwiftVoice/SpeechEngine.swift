@@ -132,7 +132,9 @@ final class SpeechEngine {
 
         streamingActive = hasEditableFocus()
         streamingInserted = ""
-        micPanel?.show()
+        if streamingActive {
+            micPanel?.show()
+        }
         DictationSounds.shared.playBegin()
 
         do {
