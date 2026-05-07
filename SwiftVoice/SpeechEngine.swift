@@ -20,6 +20,7 @@ final class SpeechEngine {
     private var volatileText = ""
 
     private var micPanel: MicIndicatorPanel?
+    private var notchPanel: NotchPanel?
     private var keyDownMonitor: Any?
     private var appSwitchObserver: NSObjectProtocol?
     private let dictationKeyBlocker = DictationKeyBlocker()
@@ -50,6 +51,7 @@ final class SpeechEngine {
             // Pre-warm so the first show() doesn't pay the NSHostingView/SwiftUI
             // initial-layout cost on the animation hot path.
             self.micPanel = MicIndicatorPanel()
+            self.notchPanel = NotchPanel(engine: self)
             Task { await self.prewarmRecognition() }
         }
     }
@@ -134,6 +136,8 @@ final class SpeechEngine {
         streamingInserted = ""
         if streamingActive {
             micPanel?.show()
+        } else {
+            notchPanel?.show()
         }
         DictationSounds.shared.playBegin()
 
@@ -145,8 +149,12 @@ final class SpeechEngine {
             statusMessage = error.localizedDescription
             isListening = false
             streamingActive = false
-            let panel = micPanel
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { panel?.dismiss() }
+            let micPanel = micPanel
+            let notchPanel = notchPanel
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                micPanel?.dismiss()
+                notchPanel?.dismiss()
+            }
         }
     }
 
@@ -276,6 +284,7 @@ final class SpeechEngine {
         volatileText = ""
         statusMessage = "Ready — press F5 to toggle"
         micPanel?.dismiss()
+        notchPanel?.dismiss()
         DictationSounds.shared.playEnd()
 
         let wasStreaming = streamingActive
