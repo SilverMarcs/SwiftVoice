@@ -239,7 +239,12 @@ struct NotchPanelView: View {
                     dotPulse = true
                 }
             } else {
-                dotPulse = false
+                // A repeatForever animation is not cancelled by a plain assignment —
+                // SwiftUI keeps interpolating the AnimatablePair forever, which pegs CPU.
+                // Replacing it with a finite animation actually stops the cycle.
+                withAnimation(.linear(duration: 0.2)) {
+                    dotPulse = false
+                }
             }
         }
         .onChange(of: engine.currentTranscription) {
