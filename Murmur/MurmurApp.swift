@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct SwiftVoiceApp: App {
+struct MurmurApp: App {
     @State private var engine = SpeechEngine()
 
     var body: some Scene {

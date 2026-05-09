@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "08FD71522F67E6030034F321"
-               BuildableName = "SwiftVoice.app"
-               BlueprintName = "SwiftVoice"
-               ReferencedContainer = "container:SwiftVoice.xcodeproj">
+               BuildableName = "Murmur.app"
+               BlueprintName = "Murmur"
+               ReferencedContainer = "container:Murmur.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,9 +45,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "08FD71522F67E6030034F321"
-            BuildableName = "SwiftVoice.app"
-            BlueprintName = "SwiftVoice"
-            ReferencedContainer = "container:SwiftVoice.xcodeproj">
+            BuildableName = "Murmur.app"
+            BlueprintName = "Murmur"
+            ReferencedContainer = "container:Murmur.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,9 +62,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "08FD71522F67E6030034F321"
-            BuildableName = "SwiftVoice.app"
-            BlueprintName = "SwiftVoice"
-            ReferencedContainer = "container:SwiftVoice.xcodeproj">
+            BuildableName = "Murmur.app"
+            BlueprintName = "Murmur"
+            ReferencedContainer = "container:Murmur.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
