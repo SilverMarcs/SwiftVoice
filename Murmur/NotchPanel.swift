@@ -7,6 +7,7 @@ final class NotchGeometry: ObservableObject {
     @Published var notchWidth: CGFloat = 185
     @Published var notchHeight: CGFloat = 38
     @Published var hasNotch: Bool = false
+    @Published var screenWidth: CGFloat = 1440
     /// Animated reveal: false collapses the mask to the hardware notch; true expands horizontally.
     @Published var presented: Bool = false
     /// Animated text panel: false hides; true grows the mask downward.
@@ -14,14 +15,16 @@ final class NotchGeometry: ObservableObject {
 
     func update(for screen: NSScreen) {
         hasNotch = screen.safeAreaInsets.top > 0
+        screenWidth = screen.frame.width
         if hasNotch,
            let left = screen.auxiliaryTopLeftArea?.width,
            let right = screen.auxiliaryTopRightArea?.width {
             notchWidth = screen.frame.width - left - right + 4
             notchHeight = screen.safeAreaInsets.top
         } else {
-            notchWidth = 140
-            notchHeight = 32
+            // No hardware notch: collapsed pill is just large enough to host the red dot.
+            notchWidth = 22
+            notchHeight = 28
         }
     }
 }
@@ -29,8 +32,8 @@ final class NotchGeometry: ObservableObject {
 /// Mimics DynamicNotchKit's reveal: a black rectangle clipped by a NotchShape mask.
 /// The mask's frame is animated (notch dimensions ↔ compact dimensions ↔ expanded with text).
 final class NotchPanel: NSPanel {
-    private static let panelWidth: CGFloat = 500
-    private static let panelHeight: CGFloat = 200
+    private static let panelWidth: CGFloat = 1200
+    private static let panelHeight: CGFloat = 240
 
     private let notchGeometry = NotchGeometry()
     private var hideTask: DispatchWorkItem?
@@ -172,8 +175,13 @@ struct NotchPanelView: View {
     @State private var dotPulse = false
 
     private let compactExtension: CGFloat = 26 // Just enough room for the dot + padding.
-    private let expandedExtension: CGFloat = 80 // Wider when transcription is showing.
-    private let textExpandedHeight: CGFloat = 70
+    private let expandedExtension: CGFloat = 80 // Notched: extra width beyond the hardware notch.
+    private let textExpandedHeight: CGFloat = 90
+    /// Expanded mask width as a fraction of the active display width. Keeps the
+    /// transcription panel visually balanced across 13" laptops and 5K externals.
+    private let expandedWidthFraction: CGFloat = 0.22
+    private let expandedWidthMin: CGFloat = 260
+    private let expandedWidthMax: CGFloat = 900
     private let compactTopCorner: CGFloat = 4
     private let compactBottomCorner: CGFloat = 10
     private let expandedTopCorner: CGFloat = 6
@@ -190,12 +198,19 @@ struct NotchPanelView: View {
 
     /// Mask width when listening but no text yet — minimal pill around the dot.
     private var compactWidth: CGFloat {
-        geometry.hasNotch ? geometry.notchWidth + 2 * compactExtension : 110
+        geometry.hasNotch ? geometry.notchWidth + 2 * compactExtension : 40
     }
 
-    /// Mask width when transcription is showing — wider to give text breathing room.
+    /// Mask width when transcription is showing — scales with the active display
+    /// so the panel stays proportionally sized on small laptops and big externals.
     private var expandedWidth: CGFloat {
-        geometry.hasNotch ? geometry.notchWidth + 2 * expandedExtension : 240
+        let scaled = geometry.screenWidth * expandedWidthFraction
+        let target = min(max(scaled, expandedWidthMin), expandedWidthMax)
+        if geometry.hasNotch {
+            // Never narrower than the hardware notch plus a minimum extension on each side.
+            return max(target, geometry.notchWidth + 2 * expandedExtension)
+        }
+        return target
     }
 
     /// Width of the inner content stack — always sized to the largest possible width;
@@ -259,11 +274,18 @@ struct NotchPanelView: View {
     }
 
     private var statusBar: some View {
-        // Manual nudge: the dot's center sits `dotInsetFromNotch` pt to the left of
-        // the hardware notch (smaller than half the compact extension), so it visually
-        // reads as closer to the notch.
-        let dotInsetFromNotch: CGFloat = 8
-        let leadingPadding = expandedExtension - dotInsetFromNotch - dotSize / 2
+        // With a hardware notch, manually nudge the dot so its center sits
+        // `dotInsetFromNotch` pt to the left of the notch's left edge.
+        // Without a notch, center the dot within the content stack so it
+        // sits in the middle of the compact pill.
+        let leadingPadding: CGFloat = {
+            if geometry.hasNotch {
+                let dotInsetFromNotch: CGFloat = 8
+                return expandedExtension - dotInsetFromNotch - dotSize / 2
+            } else {
+                return (contentWidth - dotSize) / 2
+            }
+        }()
         return HStack(spacing: 0) {
             Circle()
                 .fill(Color.red)
@@ -278,7 +300,7 @@ struct NotchPanelView: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 Text(engine.currentTranscription)
-                    .font(.system(size: 12))
+                    .font(.body)
                     .foregroundStyle(.white.opacity(0.85))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18)
