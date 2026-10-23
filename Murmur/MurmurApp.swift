@@ -2,17 +2,11 @@ import SwiftUI
 
 @main
 struct MurmurApp: App {
-    @State private var engine = SpeechEngine()
+    @State private var engine = DictationController()
 
     var body: some Scene {
         MenuBarExtra {
-            Text(engine.statusMessage)
-
-            Divider()
-
-            Button("Quit Murmur") {
-                NSApp.terminate(nil)
-            }
+            ContentView(engine: engine)
         } label: {
             Image(systemName: "waveform")
         }

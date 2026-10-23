@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA1100000000000000000001 /* DictationCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA1100000000000000000002 /* DictationCore */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		08FD71532F67E6030034F321 /* Murmur.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Murmur.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA1100000000000000000001 /* DictationCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = Murmur;
 			packageProductDependencies = (
+				AA1100000000000000000002 /* DictationCore */,
 			);
 			productName = Murmur;
 			productReference = 08FD71532F67E6030034F321 /* Murmur.app */;
@@ -95,6 +101,9 @@
 			mainGroup = 08FD714A2F67E6030034F321;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			packageReferences = (
+				AA1100000000000000000003 /* XCLocalSwiftPackageReference "Packages/DictationCore" */,
+			);
 			productRefGroup = 08FD71542F67E6030034F321 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -123,6 +132,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		AA1100000000000000000003 /* XCLocalSwiftPackageReference "Packages/DictationCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/DictationCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA1100000000000000000002 /* DictationCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DictationCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		08FD715C2F67E6040034F321 /* Debug */ = {
@@ -244,6 +267,7 @@
 		08FD715F2F67E6040034F321 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Murmur/Murmur.entitlements;
@@ -256,7 +280,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
-					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Murmur needs microphone access for speech recognition.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Murmur needs microphone access for speech recognition.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -269,13 +293,14 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
 		08FD71602F67E6040034F321 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Murmur/Murmur.entitlements;
@@ -288,7 +313,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
-					INFOPLIST_KEY_NSMicrophoneUsageDescription = "Murmur needs microphone access for speech recognition.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Murmur needs microphone access for speech recognition.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -301,7 +326,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};

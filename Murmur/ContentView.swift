@@ -1,20 +1,24 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(SpeechEngine.self) private var engine
+    let engine: DictationController
 
     var body: some View {
         Text(engine.statusMessage)
             .disabled(true)
 
-        Button(engine.isListening ? "Stop Listening" : "Start Listening") {
-            engine.toggleListening()
+        if engine.isPreparingModel {
+            Button("Cancel Model Loading", action: engine.cancelModelPreparation)
+        } else if !engine.isModelReady {
+            Button("Retry Model Loading", action: engine.prepareModel)
         }
 
         Divider()
 
-        Button("Quit") {
+        Button("Quit Murmur") {
+            engine.shutdown()
             NSApp.terminate(nil)
         }
+        .onAppear { engine.refreshShortcut() }
     }
 }
